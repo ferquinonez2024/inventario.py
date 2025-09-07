@@ -1,0 +1,7 @@
+git init
+git add inventario.py README.md
+git commit -m "Sistema de inventario POO + SQLite - entrega"
+# crea repo en GitHub y luego:
+git branch -M main
+git remote add origin https://github.com/tu_usuario/tu_repo_inventario.git
+git push -u origin main
