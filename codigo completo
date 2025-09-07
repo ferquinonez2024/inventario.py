@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""
+inventario.py
+Sistema Avanzado de Gestión de Inventario (POO + colecciones + SQLite)
+Autor: Tu Nombre
+Fecha: 2025-09-07
+
+Uso:
+    python inventario.py
+
+Este módulo implementa:
+- Clase Producto: encapsula id, nombre, cantidad y precio.
+- Clase Inventario: maneja colección en memoria (dict) y persistencia en SQLite.
+- Menú interactivo por consola para CRUD y búsquedas.
+"""
+
+import sqlite3
+from typing import Optional, Dict, List, Tuple
+
+
+DB_FILENAME = "inventario.db"
+
+
+class Producto:
+    """Representa un producto del inventario."""
+
+    def __init__(self, producto_id: int, nombre: str, cantidad: int, precio: float):
+        self._id = int(producto_id)
+        self._nombre = str(nombre)
+        self._cantidad = int(cantidad)
+        self._precio = float(precio)
+
+    # Getters y setters
+    @property
+    def id(self) -> int:
+        return self._id
+
+    @property
+    def nombre(self) -> str:
+        return self._nombre
+
+    @nombre.setter
+    def nombre(self, nuevo_nombre: str):
+        self._nombre = str(nuevo_nombre)
+
+    @property
+    def cantidad(self) -> int:
+        return self._cantidad
+
+    @cantidad.setter
+    def cantidad(self, nueva_cantidad: int):
+        self._cantidad = int(nueva_cantidad)
+
+    @property
+    def precio(self) -> float:
+        return self._precio
+
+    @precio.setter
+    def precio(self, nuevo_precio: float):
+        self._precio = float(nuevo_precio)
+
+    def to_tuple(self) -> Tuple[int, str, int, float]:
+        """Conveniencia para guardar en DB."""
+        return (self._id, self._nombre, self._cantidad, self._precio)
+
+    def __repr__(self) -> str:
+        return f"Producto(id={self._id}, nombre='{self._nombre}', cantidad={self._cantidad}, precio={self._precio:.2f})"
+
+
+class Inventario:
+    """
+    Inventario en memoria usando un diccionario {id: Producto} para acceso O(1) por ID.
+    Mantiene sincronía con la base de datos SQLite.
+    """
+
+    def __init__(self, db_filename: str = DB_FILENAME):
+        self.db_filename = db_filename
+        # Diccionario principal: id -> Producto
+        self.productos: Dict[int, Producto] = {}
+        # Índice auxiliar por nombre (minúsculas) -> set(ids) para búsquedas rápidas por nombre parcial
+        self._index_nombre: Dict[str, set] = {}
+        # Inicializar DB y cargar datos
+        self._init_db()
+        self.cargar_desde_db()
+
+    # ---------------------------
+    # ----- SQLite helpers ------
+    # ---------------------------
+    def _get_conn(self):
+        return sqlite3.connect(self.db_filename)
+
+    def _init_db(self):
+        """Crea la tabla productos si no existe."""
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS productos (
+                    id INTEGER PRIMARY KEY,
+                    nombre TEXT NOT NULL,
+                    cantidad INTEGER NOT NULL,
+                    precio REAL NOT NULL
+                )
+                """
+            )
+            conn.commit()
+
+    def guardar_producto_db(self, producto: Producto):
+        """Inserta o reemplaza un producto en la DB (UPSERT via REPLACE)."""
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "REPLACE INTO productos (id, nombre, cantidad, precio) VALUES (?, ?, ?, ?)",
+                producto.to_tuple(),
+            )
+            conn.commit()
+
+    def eliminar_producto_db(self, producto_id: int):
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM productos WHERE id = ?", (producto_id,))
+            conn.commit()
+
+    def cargar_desde_db(self):
+        """Carga todos los productos desde SQLite a la estructura en memoria."""
+        self.productos.clear()
+        self._index_nombre.clear()
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id, nombre, cantidad, precio FROM productos")
+            rows = cur.fetchall()
+            for rid, nombre, cantidad, precio in rows:
+                p = Producto(rid, nombre, cantidad, precio)
+                self.productos[p.id] = p
+                self._indexar_producto(p)
+
+    # ---------------------------
+    # ----- Index / Helpers -----
+    # ---------------------------
+    def _indexar_producto(self, producto: Producto):
+        """Indexa el nombre del producto para búsquedas rápidas (por palabras)."""
+        nombre = producto.nombre.lower()
+        # indexar por cada palabra para búsquedas parciales simples
+        palabras = set(nombre.split())
+        for w in palabras:
+            if w not in self._index_nombre:
+                self._index_nombre[w] = set()
+            self._index_nombre[w].add(producto.id)
+
+    def _desindexar_producto(self, producto: Producto):
+        nombre = producto.nombre.lower()
+        palabras = set(nombre.split())
+        for w in palabras:
+            if w in self._index_nombre:
+                self._index_nombre[w].discard(producto.id)
+                if not self._index_nombre[w]:
+                    del self._index_nombre[w]
+
+    # ---------------------------
+    # ----- Operaciones CRUD ----
+    # ---------------------------
+    def agregar_producto(self, producto: Producto) -> bool:
+        """
+        Agrega un producto al inventario en memoria y lo guarda en DB.
+        Retorna True si se agregó; False si ya existía un producto con esa ID.
+        """
+        if producto.id in self.productos:
+            return False
+        self.productos[producto.id] = producto
+        self._indexar_producto(producto)
+        self.guardar_producto_db(producto)
+        return True
+
+    def eliminar_producto(self, producto_id: int) -> bool:
+        """Elimina producto por id. Retorna True si existía y fue eliminado."""
+        if producto_id not in self.productos:
+            return False
+        p = self.productos.pop(producto_id)
+        self._desindexar_producto(p)
+        self.eliminar_producto_db(producto_id)
+        return True
+
+    def actualizar_producto(self, producto_id: int, nueva_cantidad: Optional[int] = None, nuevo_precio: Optional[float] = None, nuevo_nombre: Optional[str] = None) -> bool:
+        """
+        Actualiza atributos de un producto. Mantiene DB sincronizada.
+        Retorna True si se actualizó.
+        """
+        if producto_id not in self.productos:
+            return False
+        p = self.productos[producto_id]
+        # si cambia el nombre, reindexar
+        if nuevo_nombre is not None and nuevo_nombre != p.nombre:
+            self._desindexar_producto(p)
+            p.nombre = nuevo_nombre
+            self._indexar_producto(p)
+        if nueva_cantidad is not None:
+            p.cantidad = nueva_cantidad
+        if nuevo_precio is not None:
+            p.precio = nuevo_precio
+        self.guardar_producto_db(p)
+        return True
+
+    def buscar_por_nombre(self, termino: str) -> List[Producto]:
+        """
+        Búsqueda por nombre (parcial / palabras). Caso-insensible.
+        Utiliza índice por palabras para eficiencia.
+        """
+        termino = termino.strip().lower()
+        if not termino:
+            return []
+        palabras = termino.split()
+        resultados_ids = None
+        for w in palabras:
+            # union/ intersection: buscamos productos que contengan todas las palabras -> intersección
+            ids = self._index_nombre.get(w, set())
+            if resultados_ids is None:
+                resultados_ids = ids.copy()
+            else:
+                resultados_ids &= ids
+        if not resultados_ids:
+            # fallback a búsqueda por substring en todos los nombres (menos eficiente)
+            res = []
+            for p in self.productos.values():
+                if termino in p.nombre.lower():
+                    res.append(p)
+            return res
+        return [self.productos[i] for i in resultados_ids]
+
+    def obtener_todos(self) -> List[Producto]:
+        """Retorna lista de todos los productos ordenada por id."""
+        return sorted(self.productos.values(), key=lambda p: p.id)
+
+    def siguiente_id_disponible(self) -> int:
+        """Calcula un ID disponible: 1 + max(keys) o 1 si vacío."""
+        if not self.productos:
+            return 1
+        return max(self.productos.keys()) + 1
+
+    # ---------------------------
+    # ----- Utilidades ----------
+    # ---------------------------
+    def mostrar_tabla(self):
+        """Muestra una tabla simple por consola."""
+        productos = self.obtener_todos()
+        if not productos:
+            print("Inventario vacío.")
+            return
+        print(f"{'ID':<6}{'NOMBRE':<30}{'CANT':>8}{'PRECIO':>12}")
+        print("-" * 56)
+        for p in productos:
+            print(f"{p.id:<6}{p.nombre:<30}{p.cantidad:>8}{p.precio:>12.2f}")
+
+    def importar_lista(self, lista_tuplas: List[Tuple[int, str, int, float]]):
+        """
+        Importa varios productos desde una lista de tuplas (id, nombre, cantidad, precio).
+        Útil para pruebas o carga inicial.
+        """
+        for tid, nombre, cantidad, precio in lista_tuplas:
+            p = Producto(tid, nombre, cantidad, precio)
+            self.productos[p.id] = p
+            self._indexar_producto(p)
+            self.guardar_producto_db(p)
+
+
+# ---------------------------
+# ----- Interfaz consola ----
+# ---------------------------
+def menu_principal():
+    inv = Inventario()
+
+    def pedir_int(prompt: str, default: Optional[int] = None) -> int:
+        while True:
+            try:
+                val = input(prompt).strip()
+                if val == "" and default is not None:
+                    return default
+                return int(val)
+            except ValueError:
+                print("Entrada inválida. Ingresa un número entero.")
+
+    def pedir_float(prompt: str, default: Optional[float] = None) -> float:
+        while True:
+            try:
+                val = input(prompt).strip()
+                if val == "" and default is not None:
+                    return default
+                return float(val)
+            except ValueError:
+                print("Entrada inválida. Ingresa un número válido (p. ej. 12.50).")
+
+    while True:
+        print("\n--- SISTEMA DE INVENTARIO ---")
+        print("1) Añadir producto")
+        print("2) Eliminar producto por ID")
+        print("3) Actualizar producto (cantidad / precio / nombre)")
+        print("4) Buscar producto por nombre")
+        print("5) Mostrar todos los productos")
+        print("6) Mostrar DB file path")
+        print("0) Salir")
+        opc = input("Selecciona una opción: ").strip()
+
+        if opc == "1":
+            # crear producto; sugerir ID automático
+            sugerido_id = inv.siguiente_id_disponible()
+            print(f"ID sugerido: {sugerido_id} (puedes sobrescribirlo)")
+            pid = pedir_int("ID: ", default=sugerido_id)
+            nombre = input("Nombre: ").strip()
+            cantidad = pedir_int("Cantidad: ")
+            precio = pedir_float("Precio: ")
+            p = Producto(pid, nombre, cantidad, precio)
+            ok = inv.agregar_producto(p)
+            if ok:
+                print("Producto agregado correctamente.")
+            else:
+                print("Error: ya existe un producto con ese ID.")
+
+        elif opc == "2":
+            pid = pedir_int("ID a eliminar: ")
+            ok = inv.eliminar_producto(pid)
+            if ok:
+                print("Producto eliminado.")
+            else:
+                print("No existe producto con ese ID.")
+
+        elif opc == "3":
+            pid = pedir_int("ID a actualizar: ")
+            if pid not in inv.productos:
+                print("No existe producto con ese ID.")
+                continue
+            print("Dejar campo vacío para no cambiarlo.")
+            nuevo_nombre = input("Nuevo nombre: ").strip()
+            if nuevo_nombre == "":
+                nuevo_nombre = None
+            cant_str = input("Nueva cantidad: ").strip()
+            nueva_cantidad = int(cant_str) if cant_str != "" else None
+            precio_str = input("Nuevo precio: ").strip()
+            nuevo_precio = float(precio_str) if precio_str != "" else None
+            ok = inv.actualizar_producto(pid, nueva_cantidad, nuevo_precio, nuevo_nombre)
+            if ok:
+                print("Producto actualizado.")
+            else:
+                print("No se pudo actualizar (ID no existe).")
+
+        elif opc == "4":
+            termino = input("Término de búsqueda (nombre o parte): ").strip()
+            resultados = inv.buscar_por_nombre(termino)
+            if not resultados:
+                print("No se encontraron productos.")
+            else:
+                print(f"Se encontraron {len(resultados)} producto(s):")
+                for p in resultados:
+                    print(f"  - {p}")
+
+        elif opc == "5":
+            inv.mostrar_tabla()
+
+        elif opc == "6":
+            print(f"Archivo SQLite: {inv.db_filename}")
+
+        elif opc == "0":
+            print("Saliendo. ¡Hasta luego!")
+            break
+
+        else:
+            print("Opción no válida. Intenta de nuevo.")
+
+
+if __name__ == "__main__":
+    menu_principal()
