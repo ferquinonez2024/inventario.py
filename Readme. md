@@ -1,0 +1,21 @@
+# Sistema Avanzado de Gestión de Inventario (Python + SQLite)
+
+Descripción
+-----------
+Sistema de gestión de inventarios implementado en Python, usando Programación Orientada a Objetos,
+colecciones (diccionarios, sets, listas) para eficiencia y persistencia en SQLite.
+
+Características
+---------------
+- Clase Producto con getters/setters.
+- Clase Inventario que mantiene los productos en un diccionario (acceso O(1) por ID).
+- Índice por nombre (diccionario de sets) para búsquedas por término eficientes.
+- Operaciones CRUD: añadir, eliminar, actualizar, buscar, listar.
+- Persistencia en SQLite en archivo `inventario.db`.
+- Menú interactivo en consola.
+
+Instalación y ejecución
+-----------------------
+1. Clona o descarga el repositorio.
+2. Asegúrate de tener Python 3.8+.
+3. Ejecuta:
